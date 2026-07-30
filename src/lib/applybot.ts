@@ -466,30 +466,58 @@ const FORM_SEL =
 // Hard evidence only: a submission counts when the application form is gone
 // or the URL moved to a confirmation page — never because the page merely
 // contains words like "thank you" (job descriptions often do).
-async function confirmSubmission(page: Page, beforeUrl: string, hadForm: boolean, log: (m: string) => void): Promise<boolean> {
+async function confirmSubmission(
+  page: Page,
+  beforeUrl: string,
+  hadForm: boolean,
+  log: (m: string) => void
+): Promise<boolean> {
   await page.waitForTimeout(5000);
-  const errVisible = await page
-    .locator("text=/required|can't be blank|please (select|complete|fill|choose)|fix the errors/i")
+
+  const validationError = await page
+    .locator(
+      "text=/required|can't be blank|please (select|complete|fill|choose)|fix the errors|invalid/i"
+    )
     .first()
     .isVisible()
     .catch(() => false);
-  if (errVisible) {
-    log("form still shows validation errors — NOT submitted");
+
+  if (validationError) {
+    log("validation errors remain — application was NOT submitted");
     return false;
   }
-  const urlNow = page.url();
-  if (/confirmation|thank/i.test(urlNow) && urlNow !== beforeUrl) {
-    log("confirmation URL reached");
+
+  const currentUrl = page.url();
+  const urlChanged = currentUrl !== beforeUrl;
+
+  const confirmationText = await page
+    .locator(
+      "text=/application (has been )?(submitted|received)|thank you for applying|thanks for applying|we have received your application|application complete|submission confirmed/i"
+    )
+    .first()
+    .isVisible()
+    .catch(() => false);
+
+  const confirmationUrl =
+    urlChanged &&
+    /confirmation|application-submitted|application-complete|thank-you|success/i.test(
+      currentUrl
+    );
+
+  const formStillVisible = hadForm
+    ? await page.locator(FORM_SEL).first().isVisible().catch(() => false)
+    : false;
+
+  // Require explicit external evidence. A disappearing form by itself is not
+  // enough because SPA navigation and modal changes can hide forms.
+  if (confirmationText && (confirmationUrl || !formStillVisible)) {
+    log(`verified submission confirmation at ${currentUrl}`);
     return true;
   }
-  if (hadForm) {
-    const formStill = await page.locator(FORM_SEL).first().isVisible().catch(() => false);
-    if (!formStill) {
-      log("application form is gone — submission accepted");
-      return true;
-    }
-  }
-  log("form is still on the page — treating as NOT submitted");
+
+  log(
+    `submission could not be verified — URL: ${currentUrl}; confirmation text: ${confirmationText}; form visible: ${formStillVisible}`
+  );
   return false;
 }
 
