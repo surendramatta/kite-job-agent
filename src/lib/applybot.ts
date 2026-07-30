@@ -522,22 +522,78 @@ async function confirmSubmission(
 }
 
 async function submit(page: Page, log: (m: string) => void): Promise<boolean> {
-  const btn = page
-    .locator('button[type="submit"], input[type="submit"], button:has-text("Submit application"), button:has-text("Submit Application")')
-    .first();
-  if ((await btn.count()) === 0) {
-    log("no submit button found");
-    return false;
-  }
+  const selectors = [
+    'button[type="submit"]:visible',
+    'input[type="submit"]:visible',
+    'button:has-text("Submit application"):visible',
+    'button:has-text("Submit Application"):visible',
+    'button:has-text("Submit"):visible',
+    'button:has-text("Apply"):visible',
+    'button:has-text("Apply now"):visible',
+    'button:has-text("Continue"):visible',
+    'button:has-text("Next"):visible',
+    '[role="button"]:has-text("Submit"):visible',
+    '[role="button"]:has-text("Apply"):visible',
+    '[data-testid*="submit" i]:visible',
+    '[aria-label*="submit" i]:visible',
+  ];
+
   const beforeUrl = page.url();
   const hadForm = (await page.locator(FORM_SEL).count()) > 0;
-  await btn.click();
-  log("clicked submit");
-  try {
-    await page.waitForURL((u: URL) => /confirmation|thank/i.test(u.href), { timeout: 12000 });
-    log("confirmation URL reached");
-    return true;
-  } catch {
-    return await confirmSubmission(page, beforeUrl, hadForm, log);
+
+  for (let step = 0; step < 8; step++) {
+    let btn: Page | null = null;
+
+    for (const selector of selectors) {
+      const candidate = page.locator(selector).last();
+      if (
+        (await candidate.count()) > 0 &&
+        (await candidate.isVisible().catch(() => false)) &&
+        (await candidate.isEnabled().catch(() => true))
+      ) {
+        btn = candidate;
+        break;
+      }
+    }
+
+    if (!btn) {
+      log(`no actionable submit/continue button found on ${page.url()}`);
+      return false;
+    }
+
+    const text =
+      ((await btn.innerText().catch(() => "")) ||
+        (await btn.getAttribute("value").catch(() => "")) ||
+        "button").trim();
+
+    log(`clicking "${text.slice(0, 60)}"`);
+    await btn.scrollIntoViewIfNeeded().catch(() => {});
+    await btn.click({ timeout: 10000 }).catch(async () => {
+      await btn!.click({ force: true, timeout: 5000 });
+    });
+
+    await page.waitForTimeout(2500);
+
+    if (await confirmSubmission(page, beforeUrl, hadForm, log)) {
+      return true;
+    }
+
+    const validationError = await page
+      .locator(
+        "text=/required|can't be blank|please (select|complete|fill|choose)|fix the errors|invalid/i"
+      )
+      .first()
+      .isVisible()
+      .catch(() => false);
+
+    if (validationError) {
+      log("validation errors detected after click");
+      return false;
+    }
+
+    log(`multi-step application: completed step ${step + 1}`);
   }
+
+  log("maximum application steps reached without verified confirmation");
+  return false;
 }
