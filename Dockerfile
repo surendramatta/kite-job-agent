@@ -21,12 +21,12 @@ ENV NODE_ENV=production \
 
 RUN useradd --system --uid 1001 kite || true
 
-COPY --from=builder --chown=kite:nodejs /app/.next/standalone ./
-COPY --from=builder --chown=kite:nodejs /app/.next/static ./.next/static
-COPY --from=builder --chown=kite:nodejs /app/src/lib/schema.sql ./src/lib/schema.sql
-COPY --from=builder --chown=kite:nodejs /app/scripts ./scripts
+COPY --from=builder /app/.next/standalone ./
+COPY --from=builder /app/.next/static ./.next/static
+COPY --from=builder /app/src/lib/schema.sql ./src/lib/schema.sql
+COPY --from=builder /app/scripts ./scripts
 
-RUN mkdir -p /app/data && chown -R kite:nodejs /app/data
+RUN mkdir -p /app/data
 
 USER kite
 EXPOSE 3000
