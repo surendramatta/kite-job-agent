@@ -58,7 +58,7 @@ async function processInner(limit: number): Promise<{ processed: number; error?:
     );
     return items.filter((item) => mark.run(item.qid).changes === 1);
   });
-  const queue = claim.immediate(limit) as QueueItem[];
+  const queue = (claim as typeof claim & { immediate: (limit: number) => QueueItem[] }).immediate(limit);
   if (queue.length === 0) return { processed: 0 };
 
   const profile = getProfile();
