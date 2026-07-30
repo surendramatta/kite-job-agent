@@ -1,5 +1,9 @@
 import { getDb, getSetting, Job, Resume } from "./db";
-import { extractKeywords, resumeToText, ResumeContent } from "./ats";
+import {
+  extractKeywords,
+  resumeToText,
+  ResumeContent,
+} from "./ats";
 
 export type Preferences = {
   roles: string[];
@@ -16,6 +20,12 @@ export type Preferences = {
   usaOnly: boolean;
 };
 
+export type MatchResult = {
+  score: number;
+  reasons: string[];
+  cautions: string[];
+};
+
 export function getPreferences(): Preferences {
   return {
     roles: splitList(getSetting("pref_roles")),
@@ -24,138 +34,456 @@ export function getPreferences(): Preferences {
     salaryMin: parseInt(getSetting("pref_salary_min", "0"), 10) || 0,
     experienceLevel: getSetting("pref_experience", ""),
     workAuth: getSetting("pref_work_auth", ""),
-    needsSponsorship: getSetting("pref_needs_sponsorship", "0") === "1",
+    needsSponsorship:
+      getSetting("pref_needs_sponsorship", "0") === "1",
     excludeKeywords: splitList(getSetting("pref_exclude_keywords")),
     excludeCompanies: splitList(getSetting("pref_exclude_companies")),
-    dailyLimit: parseInt(getSetting("aa_daily_limit", "25"), 10) || 25,
-    minMatchScore: parseInt(getSetting("pref_min_match", "50"), 10) || 50,
+    dailyLimit:
+      parseInt(getSetting("aa_daily_limit", "25"), 10) || 25,
+    minMatchScore:
+      parseInt(getSetting("pref_min_match", "50"), 10) || 50,
     usaOnly: getSetting("pref_usa_only", "1") !== "0",
   };
 }
 
-function splitList(s: string): string[] {
-  return s
+function splitList(value: string): string[] {
+  return value
     .split(",")
-    .map((x) => x.trim().toLowerCase())
+    .map((item) => item.trim().toLowerCase())
     .filter(Boolean);
 }
 
-export type MatchResult = {
-  score: number;
-  reasons: string[];
-  cautions: string[];
-};
+function normalize(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^\w+#./ -]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
 
-// Tsenta-style match: skills vs the JD plus preference fit (role family,
-// location/remote, salary, seniority), with a human-readable breakdown.
-export function computeMatch(job: Job, resume: ResumeContent | null, prefs: Preferences): MatchResult {
+function tokens(value: string): string[] {
+  return normalize(value)
+    .split(" ")
+    .filter((token) => token.length >= 2);
+}
+
+function titleSimilarity(candidateTitle: string, jobTitle: string): number {
+  const candidate = new Set(tokens(candidateTitle));
+  const job = new Set(tokens(jobTitle));
+
+  if (!candidate.size || !job.size) return 0;
+
+  let overlap = 0;
+  for (const token of candidate) {
+    if (job.has(token)) overlap++;
+  }
+
+  return overlap / Math.max(candidate.size, job.size);
+}
+
+function resumeTitles(resume: ResumeContent | null): string[] {
+  return (resume?.experience ?? [])
+    .map((experience) => experience.title)
+    .filter(Boolean);
+}
+
+function estimateExperienceYears(
+  resume: ResumeContent | null
+): number {
+  const periods = (resume?.experience ?? [])
+    .map((experience) => {
+      const start = parseYear(experience.start);
+      const end =
+        /present|current/i.test(experience.end ?? "")
+          ? new Date().getFullYear()
+          : parseYear(experience.end);
+
+      if (!start || !end || end < start) return 0;
+      return Math.min(end - start + 1, 10);
+    })
+    .filter((years) => years > 0);
+
+  if (!periods.length) {
+    return Math.min((resume?.experience ?? []).length * 1.5, 10);
+  }
+
+  return Math.min(
+    periods.reduce((total, years) => total + years, 0),
+    15
+  );
+}
+
+function parseYear(value?: string): number {
+  const match = value?.match(/\b(19|20)\d{2}\b/);
+  return match ? Number(match[0]) : 0;
+}
+
+function requiredExperienceYears(description: string): number {
+  const matches = [
+    ...description.matchAll(
+      /(\d+)\s*(?:\+|plus)?\s*(?:-|to)?\s*\d*\s*years?(?:\s+of)?\s+(?:professional\s+)?experience/gi
+    ),
+  ];
+
+  if (!matches.length) return 0;
+
+  return Math.max(
+    ...matches.map((match) => Number(match[1]) || 0)
+  );
+}
+
+function seniorityLevel(text: string): number {
+  const value = normalize(text);
+
+  if (
+    /\b(principal|staff|director|head|vice president|vp)\b/.test(
+      value
+    )
+  ) {
+    return 5;
+  }
+
+  if (/\b(senior|sr|lead|manager)\b/.test(value)) return 4;
+  if (/\b(mid|intermediate|level ii|level 2)\b/.test(value)) return 3;
+  if (
+    /\b(junior|jr|entry|associate|level i|level 1|graduate)\b/.test(
+      value
+    )
+  ) {
+    return 1;
+  }
+
+  return 2;
+}
+
+function extractRequiredKeywords(description: string): string[] {
+  const requiredSections = description
+    .split(/\n|[.!?]\s+/)
+    .filter((sentence) =>
+      /\b(required|requirements|must have|must possess|minimum qualifications|you have|we need)\b/i.test(
+        sentence
+      )
+    )
+    .join(" ");
+
+  const source = requiredSections || description;
+
+  return extractKeywords(source, 20).map(
+    (keyword) => keyword.keyword
+  );
+}
+
+function hasKeyword(text: string, keyword: string): boolean {
+  const normalizedText = ` ${normalize(text)} `;
+  const normalizedKeyword = normalize(keyword);
+
+  return (
+    normalizedText.includes(` ${normalizedKeyword} `) ||
+    normalizedText.includes(normalizedKeyword)
+  );
+}
+
+function salaryMaximum(salary: string): number {
+  const numbers = (
+    salary.match(/\d[\d,]*(?:\.\d+)?/g) ?? []
+  ).map((value) =>
+    Number(value.replace(/,/g, ""))
+  );
+
+  if (!numbers.length) return 0;
+
+  let maximum = Math.max(...numbers);
+
+  if (
+    /\b\d+(?:\.\d+)?k\b/i.test(salary) ||
+    (maximum < 1000 && /\bannual|year|salary\b/i.test(salary))
+  ) {
+    maximum *= 1000;
+  }
+
+  return maximum;
+}
+
+export function computeMatch(
+  job: Job,
+  resume: ResumeContent | null,
+  prefs: Preferences
+): MatchResult {
   const reasons: string[] = [];
   const cautions: string[] = [];
-  const hay = `${job.title} ${job.tags_json} ${job.description.slice(0, 400)}`.toLowerCase();
 
-  // Skills overlap: 60 points
-  let skillPoints = 0;
-  if (resume) {
-    const keywords = extractKeywords(job.description, 25);
-    const resumeText = " " + resumeToText(resume).toLowerCase() + " ";
-    const matched = keywords.filter((k) => resumeText.includes(k.keyword));
-    const totalWeight = keywords.reduce((s, k) => s + k.count, 0) || 1;
-    const matchedWeight = matched.reduce((s, k) => s + k.count, 0);
-    skillPoints = Math.round((matchedWeight / totalWeight) * 60);
-    if (matched.length > 0) {
-      const top = matched.slice(0, 3).map((k) => k.keyword);
-      reasons.push(
-        `Skills match: ${top.join(", ")}${matched.length > 3 ? ` +${matched.length - 3} more` : ""}`
-      );
-    } else {
-      cautions.push("Few of the posting's keywords appear on your résumé");
-    }
-  } else {
-    skillPoints = 30;
-    cautions.push("Add a résumé to get a real skills match");
+  if (!resume) {
+    return {
+      score: 0,
+      reasons: [],
+      cautions: ["Upload a résumé before ranking this job"],
+    };
   }
 
-  // Role family: 15 points
-  let rolePoints = 0;
-  if (prefs.roles.length === 0) {
-    rolePoints = 8;
-  } else if (prefs.roles.some((r) => hay.includes(r))) {
-    rolePoints = 15;
-    reasons.push(`Role matches your target: ${prefs.roles.find((r) => hay.includes(r))}`);
+  const resumeText = resumeToText(resume);
+  const jobText = `${job.title}\n${job.description}\n${job.tags_json}`;
+  const candidateTitles = [
+    ...prefs.roles,
+    ...resumeTitles(resume),
+  ];
+
+  let score = 0;
+
+  // 1. Job-title and role-family fit: 25 points
+  const titleScores = candidateTitles.map((title) =>
+    titleSimilarity(title, job.title)
+  );
+  const bestTitleScore = titleScores.length
+    ? Math.max(...titleScores)
+    : 0;
+
+  if (bestTitleScore >= 0.65) {
+    score += 25;
+    reasons.push("Strong match with your target job titles");
+  } else if (bestTitleScore >= 0.35) {
+    score += 15;
+    reasons.push("Related to your target role family");
+  } else if (
+    candidateTitles.some((title) =>
+      normalize(job.title).includes(normalize(title))
+    )
+  ) {
+    score += 18;
+    reasons.push("Job title contains one of your target roles");
   } else {
-    cautions.push("Outside your target role family");
+    cautions.push("Job title is outside your strongest role family");
   }
 
-  // Location / remote: 15 points
-  let locPoints = 0;
-  const jobLoc = job.location.toLowerCase();
+  // 2. Required-skill coverage: 35 points
+  const requiredKeywords =
+    extractRequiredKeywords(job.description);
+  const matchedRequired = requiredKeywords.filter((keyword) =>
+    hasKeyword(resumeText, keyword)
+  );
+  const missingRequired = requiredKeywords.filter(
+    (keyword) => !hasKeyword(resumeText, keyword)
+  );
+
+  const requiredCoverage = requiredKeywords.length
+    ? matchedRequired.length / requiredKeywords.length
+    : 0;
+
+  score += Math.round(requiredCoverage * 35);
+
+  if (matchedRequired.length) {
+    reasons.push(
+      `${matchedRequired.length}/${requiredKeywords.length} key requirements matched: ${matchedRequired
+        .slice(0, 5)
+        .join(", ")}`
+    );
+  }
+
+  if (missingRequired.length) {
+    cautions.push(
+      `Missing or unproven requirements: ${missingRequired
+        .slice(0, 5)
+        .join(", ")}`
+    );
+  }
+
+  // Strong penalty when most requirements are absent.
+  if (
+    requiredKeywords.length >= 5 &&
+    requiredCoverage < 0.35
+  ) {
+    score -= 18;
+    cautions.push("Low coverage of the posting's core requirements");
+  }
+
+  // 3. Overall skill similarity: 15 points
+  const overallKeywords = extractKeywords(job.description, 30);
+  const overallMatched = overallKeywords.filter((keyword) =>
+    hasKeyword(resumeText, keyword.keyword)
+  );
+
+  const overallCoverage = overallKeywords.length
+    ? overallMatched.length / overallKeywords.length
+    : 0;
+
+  score += Math.round(overallCoverage * 15);
+
+  if (overallCoverage >= 0.6) {
+    reasons.push("Strong overall résumé-to-description alignment");
+  }
+
+  // 4. Years-of-experience fit: 10 points
+  const candidateYears = estimateExperienceYears(resume);
+  const requiredYears = requiredExperienceYears(job.description);
+
+  if (!requiredYears) {
+    score += 6;
+  } else if (candidateYears >= requiredYears) {
+    score += 10;
+    reasons.push(
+      `Experience aligns: approximately ${candidateYears} years versus ${requiredYears}+ required`
+    );
+  } else if (candidateYears + 1 >= requiredYears) {
+    score += 5;
+    cautions.push(
+      `Slight experience gap: approximately ${candidateYears} years versus ${requiredYears}+ required`
+    );
+  } else {
+    score -= 15;
+    cautions.push(
+      `Experience gap: approximately ${candidateYears} years versus ${requiredYears}+ required`
+    );
+  }
+
+  // 5. Seniority fit: 5 points
+  const candidateSeniority = Math.max(
+    1,
+    ...candidateTitles.map(seniorityLevel)
+  );
+  const jobSeniority = seniorityLevel(job.title);
+
+  if (jobSeniority <= candidateSeniority + 1) {
+    score += 5;
+  } else {
+    score -= 12;
+    cautions.push("The role appears above your current seniority level");
+  }
+
+  // 6. Location and remote fit: 5 points
+  const location = normalize(job.location);
+
   if (job.remote) {
-    locPoints = 15;
+    score += 5;
     reasons.push("Remote-friendly");
   } else if (prefs.remoteOnly) {
-    cautions.push("On-site, but you prefer remote");
-  } else if (prefs.locations.length === 0 || prefs.locations.some((l) => jobLoc.includes(l))) {
-    locPoints = prefs.locations.length ? 15 : 10;
-    if (prefs.locations.length) reasons.push(`Location fits: ${job.location}`);
-  } else {
-    cautions.push(`Location is ${job.location || "unspecified"}`);
-  }
-
-  // Salary: 10 points
-  let salPoints = 5;
-  const salNums = (job.salary.match(/\d[\d,]*/g) ?? []).map((n) => parseInt(n.replace(/,/g, ""), 10));
-  const salMax = salNums.length ? Math.max(...salNums) * (job.salary.includes("k") ? 1000 : 1) : 0;
-  if (prefs.salaryMin > 0 && salMax > 0) {
-    if (salMax >= prefs.salaryMin) {
-      salPoints = 10;
-      reasons.push(`Salary ${job.salary} meets your minimum`);
-    } else {
-      salPoints = 0;
-      cautions.push(`Salary ${job.salary} is below your minimum`);
+    score -= 10;
+    cautions.push("This is not a remote role");
+  } else if (
+    !prefs.locations.length ||
+    prefs.locations.some((preferred) =>
+      location.includes(normalize(preferred))
+    )
+  ) {
+    score += 5;
+    if (job.location) {
+      reasons.push(`Location fits: ${job.location}`);
     }
+  } else {
+    score -= 5;
+    cautions.push(
+      `Location does not match your preferences: ${
+        job.location || "not provided"
+      }`
+    );
   }
 
-  // Sponsorship signal (informational only)
-  if (prefs.needsSponsorship && /no sponsorship|unable to sponsor|not sponsor/i.test(job.description)) {
-    cautions.push("Posting says the company does not sponsor visas");
+  // 7. Work authorization and sponsorship: 5 points
+  const noSponsorship =
+    /\b(no|not|unable to|cannot|can't)\s+(?:provide\s+)?(?:visa\s+)?sponsorship\b/i.test(
+      job.description
+    ) ||
+    /\bmust not require sponsorship\b/i.test(job.description);
+
+  if (prefs.needsSponsorship && noSponsorship) {
+    score -= 20;
+    cautions.push("The posting states that sponsorship is unavailable");
+  } else {
+    score += 5;
   }
 
-  const score = Math.max(5, Math.min(98, skillPoints + rolePoints + locPoints + salPoints));
-  return { score, reasons, cautions };
+  // Salary is a filter and caution, not a relevance booster.
+  const maximumSalary = salaryMaximum(job.salary);
+
+  if (
+    prefs.salaryMin > 0 &&
+    maximumSalary > 0 &&
+    maximumSalary < prefs.salaryMin
+  ) {
+    score -= 8;
+    cautions.push(
+      `${job.salary} is below your minimum compensation`
+    );
+  }
+
+  const finalScore = Math.max(0, Math.min(100, Math.round(score)));
+
+  if (finalScore >= 80) {
+    reasons.unshift("Excellent résumé match");
+  } else if (finalScore >= 65) {
+    reasons.unshift("Strong résumé match");
+  } else if (finalScore < 45) {
+    cautions.unshift("Low-confidence match");
+  }
+
+  return {
+    score: finalScore,
+    reasons,
+    cautions,
+  };
 }
 
-const NON_US = /\b(germany|india|united kingdom|uk|london|berlin|paris|france|spain|poland|brazil|canada|toronto|australia|singapore|netherlands|amsterdam|ireland|dublin|portugal|romania|ukraine|mexico|argentina|japan|china|philippines|nigeria|kenya|emea|apac|latam)\b/i;
-const US_HINT = /\b(united states|usa|u\.s\.|us only|remote \(us|,\s*(al|ak|az|ar|ca|co|ct|de|fl|ga|hi|id|il|in|ia|ks|ky|la|me|md|ma|mi|mn|ms|mo|mt|ne|nv|nh|nj|nm|ny|nc|nd|oh|ok|or|pa|ri|sc|sd|tn|tx|ut|vt|va|wa|wv|wi|wy)\b)/i;
+const NON_US =
+  /\b(germany|india|united kingdom|uk|london|berlin|paris|france|spain|poland|brazil|canada|toronto|australia|singapore|netherlands|amsterdam|ireland|dublin|portugal|romania|ukraine|mexico|argentina|japan|china|philippines|nigeria|kenya|emea|apac|latam)\b/i;
 
-// Keep the feed to US-based roles when the user wants that.
+const US_HINT =
+  /\b(united states|usa|u\.s\.|us only|remote \(us|,\s*(al|ak|az|ar|ca|co|ct|de|fl|ga|hi|id|il|in|ia|ks|ky|la|me|md|ma|mi|mn|ms|mo|mt|ne|nv|nh|nj|nm|ny|nc|nd|oh|ok|or|pa|ri|sc|sd|tn|tx|ut|vt|va|wa|wv|wi|wy)\b)/i;
+
 export function isUsJob(job: Job): boolean {
-  const loc = `${job.location} ${job.title}`;
-  if (US_HINT.test(loc)) return true;
-  if (NON_US.test(loc)) return false;
-  // Remote with no country signal: treat worldwide remote as acceptable.
-  return job.remote === 1 || loc.trim() === "";
+  const location = `${job.location} ${job.title}`;
+
+  if (US_HINT.test(location)) return true;
+  if (NON_US.test(location)) return false;
+
+  return job.remote === 1 || location.trim() === "";
 }
 
-export function isExcluded(job: Job, prefs: Preferences): boolean {
+export function isExcluded(
+  job: Job,
+  prefs: Preferences
+): boolean {
   if (prefs.usaOnly && !isUsJob(job)) return true;
-  const hay = `${job.title} ${job.company} ${job.tags_json}`.toLowerCase();
-  if (prefs.excludeCompanies.some((c) => job.company.toLowerCase().includes(c))) return true;
-  if (prefs.excludeKeywords.some((k) => hay.includes(k))) return true;
+
+  const text =
+    `${job.title} ${job.company} ${job.tags_json}`.toLowerCase();
+
+  if (
+    prefs.excludeCompanies.some((company) =>
+      job.company.toLowerCase().includes(company)
+    )
+  ) {
+    return true;
+  }
+
+  if (
+    prefs.excludeKeywords.some((keyword) =>
+      text.includes(keyword)
+    )
+  ) {
+    return true;
+  }
+
   return false;
 }
 
 export function getDefaultResumeContent(): ResumeContent | null {
-  const row = getDb().prepare("SELECT * FROM resumes WHERE is_default = 1").get() as
-    | Resume
-    | undefined;
-  return row ? (JSON.parse(row.content_json) as ResumeContent) : null;
+  const row = getDb()
+    .prepare(
+      "SELECT * FROM resumes WHERE is_default = 1"
+    )
+    .get() as Resume | undefined;
+
+  return row
+    ? (JSON.parse(row.content_json) as ResumeContent)
+    : null;
 }
 
 export function appliedTodayCount(): number {
   const row = getDb()
     .prepare(
-      `SELECT COUNT(*) AS n FROM applications WHERE applied_at >= datetime('now', 'start of day')`
+      `SELECT COUNT(*) AS n
+       FROM applications
+       WHERE applied_at >= datetime('now', 'start of day')`
     )
     .get() as { n: number };
+
   return row.n;
 }
