@@ -1,0 +1,33 @@
+services:
+  web:
+    build: .
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      KITE_WORKER_SECRET: ${KITE_WORKER_SECRET}
+      KITE_SESSION_SECRET: ${KITE_SESSION_SECRET}
+      KITE_DATA_DIR: /app/data
+    volumes:
+      - kite_data:/app/data
+    ports:
+      - "3000:3000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>{if(!r.ok)process.exit(1)})"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  worker:
+    build: .
+    restart: unless-stopped
+    command: ["node", "scripts/worker-loop.mjs"]
+    environment:
+      KITE_INTERNAL_URL: http://web:3000
+      KITE_WORKER_SECRET: ${KITE_WORKER_SECRET}
+      KITE_WORKER_INTERVAL_MS: 60000
+    depends_on:
+      web:
+        condition: service_healthy
+
+volumes:
+  kite_data:

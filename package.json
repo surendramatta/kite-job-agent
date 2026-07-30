@@ -1,0 +1,38 @@
+{
+  "name": "kite",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Kite \u2014 your job hunt, on autopilot. Private, self-hosted AI job application agent.",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start -H 0.0.0.0",
+    "postinstall": "playwright install chromium || true",
+    "seed": "node scripts/seed.mjs",
+    "refresh-jobs": "node scripts/refresh-jobs.mjs",
+    "apply-bot": "node scripts/apply-bot.mjs",
+    "worker": "node scripts/worker-loop.mjs"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.11.1",
+    "imapflow": "^1.4.7",
+    "mailparser": "^3.9.14",
+    "mammoth": "^1.12.0",
+    "next": "^15.5.20",
+    "pdf-parse": "^2.4.5",
+    "playwright": "^1.61.1",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.3.3",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/mailparser": "^3.4.6",
+    "@types/node": "^26.1.1",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "postcss": "^8.5.19",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^5.9.3"
+  }
+}
