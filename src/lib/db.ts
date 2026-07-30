@@ -33,13 +33,12 @@ function migrate(db: Db) {
   db.exec(`
     UPDATE applications SET status = CASE status
       WHEN 'applied' THEN 'submitted'
-      WHEN 'in_flight' THEN 'submitted'
       WHEN 'interview' THEN 'interviewing'
       WHEN 'queued' THEN 'pending_approval'
       WHEN 'viewed' THEN 'needs_you'
       WHEN 'withdrawn' THEN 'skipped'
       ELSE status END
-    WHERE status IN ('applied','in_flight','interview','queued','viewed','withdrawn');
+    WHERE status IN ('applied','interview','queued','viewed','withdrawn');
   `);
   const inboxCols = (db.pragma("table_info(inbox_messages)") as { name: string }[]).map((c) => c.name);
   if (!inboxCols.includes("category")) {
@@ -158,7 +157,7 @@ export type AppStatus = (typeof APP_STATUSES)[number];
 export const STATUS_LABELS: Record<string, string> = {
   preparing: "Tailoring résumé",
   pending_approval: "Review Required",
-  in_flight: "In flight",
+  in_flight: "Applying",
   submitted: "Submitted",
   needs_you: "Needs you",
   interviewing: "Interviewing",
