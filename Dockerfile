@@ -1,33 +1,19 @@
-FROM node:22-bookworm-slim AS deps
-WORKDIR /app
-COPY package.json package-lock.json ./
-RUN npm ci
+FROM mcr.microsoft.com/playwright:v1.61.1-noble
 
-FROM node:22-bookworm-slim AS builder
 WORKDIR /app
-ENV NEXT_TELEMETRY_DISABLED=1
-COPY --from=deps /app/node_modules ./node_modules
-COPY . .
-RUN npm run build
 
-FROM mcr.microsoft.com/playwright:v1.61.1-noble AS runner
-WORKDIR /app
 ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1 \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
-    KITE_DATA_DIR=/app/data \
-    HOSTNAME=0.0.0.0 \
-    PORT=3000
+    KITE_DATA_DIR=/app/data
 
-RUN useradd --system --uid 1001 kite || true
+COPY package.json package-lock.json ./
+RUN npm ci
 
-COPY --from=builder /app/.next/standalone ./
-COPY --from=builder /app/.next/static ./.next/static
-COPY --from=builder /app/src/lib/schema.sql ./src/lib/schema.sql
-COPY --from=builder /app/scripts ./scripts
-
+COPY . .
+RUN npm run build
 RUN mkdir -p /app/data
 
-USER kite
 EXPOSE 3000
-CMD ["node", "server.js"]
+
+CMD ["npm", "run", "start"]
